@@ -125,6 +125,9 @@ services:
       NV_INGEST_FILES_PER_BATCH: ${NV_INGEST_FILES_PER_BATCH:-16}
       NV_INGEST_CONCURRENT_BATCHES: ${NV_INGEST_CONCURRENT_BATCHES:-4}
 
+      # NV-Ingest Tracing Configuration
+      ENABLE_NV_INGEST_TRACING: ${ENABLE_NV_INGEST_TRACING:-false}
+
     ports:
       - "8082:8082"
     expose:

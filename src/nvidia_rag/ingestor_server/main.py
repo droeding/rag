@@ -40,6 +40,7 @@ import json
 import logging
 import os
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -51,6 +52,7 @@ from langchain_core.output_parsers.string import StrOutputParser
 from langchain_core.prompts.chat import ChatPromptTemplate
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from nv_ingest_client.primitives.tasks.extract import _DEFAULT_EXTRACTOR_MAP
+from nv_ingest_client.util.document_analysis import analyze_document_chunks
 from nv_ingest_client.util.file_processing.extract import EXTENSION_TO_DOCUMENT_TYPE
 from nv_ingest_client.util.vdb.adt_vdb import VDB
 
@@ -88,6 +90,11 @@ SUPPORTED_MODES = [LIBRARY_MODE, SERVER_MODE]
 
 SUPPORTED_FILE_TYPES = set(_DEFAULT_EXTRACTOR_MAP.keys()) & set(
     EXTENSION_TO_DOCUMENT_TYPE.keys()
+)
+
+# NV-Ingest Tracing Configuration
+ENABLE_NV_INGEST_TRACING = (
+    os.getenv("ENABLE_NV_INGEST_TRACING", "false").lower() == "true"
 )
 
 
@@ -137,6 +144,129 @@ class NvidiaRAGIngestor:
                     "or nv_ingest_client.util.vdb.adt_vdb.VDB. "
                     "Please make sure all the required methods are implemented."
                 )
+
+    def _log_trace_metrics(
+        self,
+        batch_number: int,
+        traces: list[dict[str, Any]],
+        results: list[list[dict[str, str | dict]]],
+        filepaths: list[str],
+        file_type: str = "all",
+    ):
+        """
+        Save raw trace data to default volume per file.
+
+        Args:
+            batch_number: Batch number for identification
+            traces: List of trace dictionaries (one per document)
+            results: List of results from NV-Ingest (for calculating total chunks)
+            filepaths: List of filepaths corresponding to traces
+            file_type: Type of files processed (PDF, non-PDF, all)
+        """
+        if not traces:
+            logger.debug(f"No trace data available for batch {batch_number}")
+            return
+
+        try:
+            base_dir = os.getenv("INGESTOR_SERVER_DATA_DIR", "/data/")
+            traces_dir = os.path.join(base_dir, "traces")
+            os.makedirs(traces_dir, exist_ok=True)
+
+            # Analyze documents to get detailed breakdown
+            doc_analysis = None
+            try:
+                doc_analysis = analyze_document_chunks(results)
+                
+                # Log batch-level analysis
+                total_elements = 0
+                total_pages = 0
+                for doc_name, pages in doc_analysis.items():
+                    total_counts = pages.get("total", {})
+                    page_count = len(pages) - 1  # Exclude 'total' key
+                    elements = sum(total_counts.values())
+                    total_elements += elements
+                    total_pages += page_count
+                    logger.debug(
+                        f"   {doc_name}: {elements} elements across {page_count} pages"
+                    )
+                
+                logger.info(
+                    f"Batch {batch_number} analysis: {total_elements} elements "
+                    f"across {total_pages} pages in {len(results)} documents"
+                )
+            except Exception as e:
+                logger.debug(f"Document analysis failed: {e}")
+
+            # Save trace data for each file
+            if len(traces) == len(filepaths) == len(results):
+                for i, filepath in enumerate(filepaths):
+                    file_trace = [traces[i]] if i < len(traces) else []
+                    file_results = results[i] if i < len(results) else []
+
+                    # Calculate total chunks from results
+                    total_chunks = 0
+                    if file_results:
+                        if isinstance(file_results, list):
+                            total_chunks = len(file_results)
+                        else:
+                            total_chunks = 1
+
+                    # Get per-file analysis if available
+                    filename = os.path.basename(filepath)
+                    file_doc_analysis = None
+                    if doc_analysis and filename in doc_analysis:
+                        file_doc_analysis = {filename: doc_analysis[filename]}
+
+                    # Generate filename
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    base_name = os.path.splitext(os.path.basename(filepath))[0]
+                    safe_base_name = base_name.replace(" ", "_")
+                    trace_filename = f"{safe_base_name}_{timestamp}.json"
+                    trace_filepath = os.path.join(traces_dir, trace_filename)
+
+                    trace_output = {
+                        "filename": os.path.basename(filepath),
+                        "batch_number": batch_number,
+                        "file_size_bytes": os.path.getsize(filepath),
+                        "timestamp": datetime.now().isoformat(),
+                        "total_chunks": total_chunks,
+                        "traces": file_trace,
+                    }
+
+                    # Add document analysis if available
+                    if file_doc_analysis:
+                        trace_output["document_analysis"] = file_doc_analysis
+
+                    with open(trace_filepath, "w") as f:
+                        json.dump(trace_output, f, indent=2, default=str)
+
+                    logger.debug(f"Trace data saved: {trace_filepath}")
+
+                logger.info(
+                    f"Trace data saved for {len(traces)} files to: {traces_dir}"
+                )
+            else:
+                logger.warning(
+                    f"Trace count ({len(traces)}), filepath count ({len(filepaths)}), "
+                    f"and result count ({len(results)}) mismatch. Skipping trace save."
+                )
+        except Exception as e:
+            logger.warning(f"Failed to save trace data: {e}")
+
+    def _build_ingest_kwargs(self) -> dict[str, Any]:
+        """
+        Build ingest arguments dict based on tracing configuration.
+
+        Returns:
+            Dict of kwargs for nv_ingest_ingestor.ingest()
+        """
+        ingest_kwargs = {
+            "return_failures": True,
+            "show_progress": logger.getEffectiveLevel() <= logging.DEBUG,
+        }
+        if ENABLE_NV_INGEST_TRACING:
+            ingest_kwargs["return_traces"] = True
+        return ingest_kwargs
 
     async def health(self, check_dependencies: bool = False) -> dict[str, Any]:
         """Check the health of the Ingestion server."""
@@ -598,7 +728,9 @@ class NvidiaRAGIngestor:
             for custom_metadata_item in (state_manager.custom_metadata or [])
         }
         filename_to_result_map = {
-            os.path.basename(result[0].get("metadata").get("source_metadata").get("source_id")): result for result in results
+            os.path.basename(result[0].get("metadata").get("source_metadata").get("source_id")): result 
+            for result in results 
+            if result  # Skip empty results to avoid list index out of range
         }
         # Generate response dictionary
         uploaded_documents = list()
@@ -1548,12 +1680,21 @@ class NvidiaRAGIngestor:
             logger.info(
                 f"Performing ingestion for batch {batch_number} with parameters: {split_options}"
             )
-            results, failures = await asyncio.to_thread(
-                lambda: nv_ingest_ingestor.ingest(
-                    return_failures=True,
-                    show_progress=logger.getEffectiveLevel() <= logging.DEBUG,
-                )
+            
+            # Perform ingestion
+            result = await asyncio.to_thread(
+                lambda: nv_ingest_ingestor.ingest(**self._build_ingest_kwargs())
             )
+            
+            # Handle return values based on tracing
+            if ENABLE_NV_INGEST_TRACING:
+                results, failures, traces = result
+                self._log_trace_metrics(
+                    batch_number, traces, results, filtered_filepaths
+                )
+            else:
+                results, failures = result
+            
             total_ingestion_time = time.time() - start_time
             document_info = self._log_result_info(batch_number, results, failures, total_ingestion_time)
             vdb_op.add_document_info(
@@ -1586,17 +1727,26 @@ class NvidiaRAGIngestor:
                 logger.info(
                     f"Performing ingestion for PDF files for batch {batch_number} with parameters: {split_options}"
                 )
-                results_pdf, failures_pdf = await asyncio.to_thread(
-                    lambda: nv_ingest_ingestor.ingest(
-                        return_failures=True,
-                        show_progress=logger.getEffectiveLevel() <= logging.DEBUG,
-                    )
+                
+                # Perform ingestion
+                result_pdf = await asyncio.to_thread(
+                    lambda: nv_ingest_ingestor.ingest(**self._build_ingest_kwargs())
                 )
+                
+                # Handle return values based on tracing
+                if ENABLE_NV_INGEST_TRACING:
+                    results_pdf, failures_pdf, traces_pdf = result_pdf
+                    self._log_trace_metrics(
+                        batch_number, traces_pdf, results_pdf, pdf_filepaths, file_type="PDF"
+                    )
+                else:
+                    results_pdf, failures_pdf = result_pdf
+                
                 total_ingestion_time = time.time() - start_time
                 document_info = self._log_result_info(
                     batch_number,
-                    results,
-                    failures,
+                    results_pdf,
+                    failures_pdf,
                     total_ingestion_time,
                     additional_summary="PDF files ingestion completed",
                 )
@@ -1617,12 +1767,25 @@ class NvidiaRAGIngestor:
                 logger.info(
                     f"Performing ingestion for non-PDF files for batch {batch_number} with parameters: {split_options}"
                 )
-                results_non_pdf, failures_non_pdf = await asyncio.to_thread(
-                    lambda: nv_ingest_ingestor.ingest(
-                        return_failures=True,
-                        show_progress=logger.getEffectiveLevel() <= logging.DEBUG,
-                    )
+                
+                # Perform ingestion
+                result_non_pdf = await asyncio.to_thread(
+                    lambda: nv_ingest_ingestor.ingest(**self._build_ingest_kwargs())
                 )
+                
+                # Handle return values based on tracing
+                if ENABLE_NV_INGEST_TRACING:
+                    results_non_pdf, failures_non_pdf, traces_non_pdf = result_non_pdf
+                    self._log_trace_metrics(
+                        batch_number,
+                        traces_non_pdf,
+                        results_non_pdf,
+                        non_pdf_filepaths,
+                        file_type="non-PDF",
+                    )
+                else:
+                    results_non_pdf, failures_non_pdf = result_non_pdf
+                
                 total_ingestion_time = time.time() - start_time
                 document_info = self._log_result_info(
                     batch_number,
@@ -1744,6 +1907,9 @@ class NvidiaRAGIngestor:
         failed_documents = []
         failed_documents_filenames = set()
         for failure in failures:
+            # Skip empty failures to avoid list index out of range
+            if not failure or len(failure) < 2:
+                continue
             error_message = str(failure[1])
             failed_filename = os.path.basename(str(failure[0]))
             failed_documents.append(

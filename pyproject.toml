@@ -35,8 +35,8 @@ dependencies = [
     "langchain-elasticsearch==0.3.2",
     "lark>=1.2.2",
     "python-dateutil>=2.9.0.post0",
-    "nv-ingest-api==2025.11.11.dev20251111",
-    "nv-ingest-client==2025.11.11.dev20251111",
+    "nv-ingest-api==2025.11.20.dev20251120",
+    "nv-ingest-client==2025.11.20.dev20251120",
     "tritonclient==2.57.0",
 ]
 
