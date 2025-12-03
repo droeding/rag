@@ -75,7 +75,6 @@ To switch between Paddle OCR and NeMo Retriever OCR, see [NeMo Retriever OCR](ne
 
 ## Related Topics
 
-- [Model Profiles](model-profiles.md)
 - [Deploy with Docker (Self-Hosted Models)](deploy-docker-self-hosted.md)
 - [Deploy with Docker (NVIDIA-Hosted Models)](deploy-docker-nvidia-hosted.md)
 - [Deploy with Helm](deploy-helm.md)

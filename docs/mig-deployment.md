@@ -160,10 +160,6 @@ helm upgrade --install rag -n rag https://helm.ngc.nvidia.com/0648981100760671/c
   -f mig-slicing/values-mig.yaml
 ```
 
-:::{note}
-If the `rag-nim-llm-0` is in a `CrashLoopBackOff` after deployment, then set the model profile explicitly to avoid any errors with NIM LLM pod deployment.
-Refer to [NIM Model Profile Configuration](model-profiles.md) to set NIM LLM profile according to the GPU type and count.
-:::
 
 :::{note}
 Due to a known issue with MIG support, currently the ingestion profile has been scaled down while deploying the chart with MIG slicing.

@@ -70,7 +70,6 @@ For optimal resource utilization, `NV_INGEST_CONCURRENT_BATCHES` times `NV_INGES
 
 ## Related Topics
 
-- [Model Profiles](model-profiles.md)
 - [Deploy with Docker (Self-Hosted Models)](deploy-docker-self-hosted.md)
 - [Deploy with Docker (NVIDIA-Hosted Models)](deploy-docker-nvidia-hosted.md)
 - [Deploy with Helm](deploy-helm.md)

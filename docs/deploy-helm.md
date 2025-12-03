@@ -83,11 +83,6 @@ To deploy End-to-End RAG Server and Ingestor Server, use the following procedure
     --set nv-ingest.redis.image.tag=8.2.1-debian-12-r0
     ```
 
-   :::{note}
-   Refer to [NIM Model Profile Configuration](model-profiles.md) to set NIM LLM profile according to the GPU type and count.
-   Set the profile explicitly to avoid any errors with NIM LLM pod deployment.
-   :::
-
 
 ## Verify a Deployment
 
@@ -220,11 +215,6 @@ helm uninstall rag -n rag
 ## Troubleshooting Helm Issues
 
 For troubleshooting issues with Helm deployment, refer to [Troubleshooting](troubleshooting.md).
-
-:::{note}
-If the `rag-nim-llm-0` is in a `CrashLoopBackOff` after deployment, then set the model profile explicitly to avoid any errors with NIM LLM pod deployment.
-To set NIM LLM profile according to the GPU type and count, refer to [NIM Model Profile Configuration](model-profiles.md).
-:::
 
 
 
