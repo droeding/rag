@@ -263,6 +263,92 @@ helm upgrade --install rag -n rag https://helm.ngc.nvidia.com/nvstaging/blueprin
 For detailed HELM deployment instructions, see [Helm Deployment Guide](deploy-helm.md).
 
 
+## Using VDB Auth Token at Runtime via APIs (Elasticsearch)
+
+When using Elasticsearch as the vector database, you can pass a per-request VDB authentication token via the HTTP `Authorization` header. The servers forward this token to Elasticsearch for that request. This enables per-user RBAC or per-request scoping without changing server env configuration.
+
+Prerequisite:
+- Ensure Elasticsearch authentication is enabled so security is enforced. In Elasticsearch this typically requires `xpack.security.enabled=true`. See the "Elasticsearch Authentication" section above for enabling security via Docker Compose or Helm and for obtaining API keys or setting credentials.
+
+### Auth priority in Elasticsearch VDB
+The Elasticsearch VDB operator resolves auth in this order:
+- Bearer auth from the incoming request `Authorization` header (preferred)
+- API Key from config (`APP_VECTORSTORE_APIKEY` or `APP_VECTORSTORE_APIKEY_ID`/`APP_VECTORSTORE_APIKEY_SECRET`)
+- Basic auth username/password from config (`APP_VECTORSTORE_USERNAME`/`APP_VECTORSTORE_PASSWORD`)
+
+If a bearer token is present, it takes precedence over API key and basic auth for that request.
+
+### Header format
+- Preferred: `Authorization: Bearer <token>`
+- Also accepted: `Authorization: <token>`
+
+What the token represents depends on your Elasticsearch security setup:
+- If using Elasticsearch API keys, you can pass the base64-encoded `id:secret` string as the bearer value.
+- If using a proxy or custom gateway, the bearer value may be an access token minted by your gateway.
+- If using basic auth only, prefer configuring it via env variables; per-request basic via header is not supported by the server wrapper—use bearer or API key via header instead.
+
+### Ingestor Server examples (Elasticsearch)
+
+- List documents:
+
+```bash
+curl -G "$INGESTOR_URL/v1/documents" \
+  -H "Authorization: Bearer ${ES_VDB_TOKEN}" \
+  --data-urlencode "collection_name=es_demo_collection"
+```
+
+- Delete a collection:
+
+```bash
+curl -X DELETE "$INGESTOR_URL/v1/collections" \
+  -H "Authorization: Bearer ${ES_VDB_TOKEN}" \
+  --data-urlencode "collection_names=es_demo_collection"
+```
+
+Notes:
+- Set `ES_VDB_TOKEN` to your runtime credential (e.g., base64 of `id:secret` for ES API keys).
+- You may also set `vdb_endpoint` on requests if you need to override the configured `APP_VECTORSTORE_URL`.
+
+### RAG Server examples (Elasticsearch)
+
+- Search:
+
+```bash
+curl -X POST "$RAG_URL/v1/search" \
+  -H "Authorization: Bearer ${ES_VDB_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "what is vector search?",
+    "use_knowledge_base": true,
+    "collection_names": ["es_demo_collection"],
+    "vdb_endpoint": "'"$APP_VECTORSTORE_URL"'",
+    "reranker_top_k": 0,
+    "vdb_top_k": 3
+  }'
+```
+
+- Generate with streaming:
+
+```bash
+curl -N -X POST "$RAG_URL/v1/generate" \
+  -H "Authorization: Bearer ${ES_VDB_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "messages": [{"role":"user","content":"Give a short summary of vector databases"}],
+    "use_knowledge_base": true,
+    "collection_names": ["es_demo_collection"],
+    "vdb_endpoint": "'"$APP_VECTORSTORE_URL"'",
+    "reranker_top_k": 0,
+    "vdb_top_k": 3
+  }'
+```
+
+### Troubleshooting
+- If you receive authentication/authorization errors from Elasticsearch, verify your token (API key validity, scopes, and expiration).
+- Ensure the server is not also configured with conflicting credentials for the same request; bearer token from the header takes precedence at runtime.
+- Confirm that `APP_VECTORSTORE_NAME=elasticsearch` and `APP_VECTORSTORE_URL` are set correctly.
+- If using Helm, see the [Elasticsearch Authentication](#elasticsearch-authentication) section above for configuring API key or basic auth as defaults when a runtime header is not supplied.
+
 # Define Your Own Vector Database
 
 You can create your own custom vector database operators by implementing the `VDBRag` base class.
@@ -400,10 +486,16 @@ Use the following steps to create and use your own custom database operators.
       - `add_document_info(info_type, collection_name, document_name, info_value)`: Store document or collection info (e.g., processing statistics, custom metadata).
       - `get_document_info(info_type, collection_name, document_name)`: Retrieve stored document/collection info; return an empty dict if none.
 
+    - Catalog metadata management (implementation of these methods is optional)
+      - `get_catalog_metadata(collection_name)`: Retrieve catalog metadata (description, tags, owner, etc.) for a collection.
+      - `update_catalog_metadata(collection_name, updates)`: Update catalog metadata for a collection with merge semantics.
+      - `get_document_catalog_metadata(collection_name, document_name)`: Retrieve catalog metadata (description, tags) for a specific document.
+      - `update_document_catalog_metadata(collection_name, document_name, updates)`: Update catalog metadata for a specific document.
+
     - Retrieval helpers
-      - Retrieval helper (e.g., `retrieval_*`): Return top‑k relevant documents using your backend’s semantic search. Support optional filters and tracing where applicable.
-      - Vector index handle (e.g., `get_*_vectorstore`): Return a handle to your backend’s vector index suitable for retrieval operations.
-      - Add collection tag (e.g., `_add_collection_name_to_*docs`): Add the originating collection name into each document’s metadata (useful for multi‑collection citations).
+      - Retrieval helper (e.g., `retrieval_*`): Return top‑k relevant documents using your backend's semantic search. Support optional filters and tracing where applicable.
+      - Vector index handle (e.g., `get_*_vectorstore`): Return a handle to your backend's vector index suitable for retrieval operations.
+      - Add collection tag (e.g., `_add_collection_name_to_*docs`): Add the originating collection name into each document's metadata (useful for multi‑collection citations).
 
     For a concrete, working example, see `src/nvidia_rag/utils/vdb/elasticsearch/elastic_vdb.py` and `notebooks/building_rag_vdb_operator.ipynb`.
 
@@ -703,7 +795,7 @@ If you encounter issues during deployment:
    helm template rag nvidia-blueprint-rag/ -f nvidia-blueprint-rag/values.yaml
    ```
 
-# Implement Retrieval-Only Vector Database Integration
+## Implement Retrieval-Only Vector Database Integration
 
 You can integrate your own vector database with NVIDIA RAG by implementing only the retrieval functionality while managing ingestion separately. This approach allows you to use existing RAG server, [RAG UI](user-interface.md), and ingestor server components with your custom vector database backend.
 

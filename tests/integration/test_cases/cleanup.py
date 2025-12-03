@@ -37,6 +37,7 @@ class CleanupModule(BaseTestModule):
     CUSTOM_METADATA_COLLECTION = "test_custom_metadata_collection"
     TEST_FILE_TYPES_COLLECTION = "test_file_types"
     CSV_DELETION_BATCH_COLLECTION = "test_csv_deletion_batch"
+    CATALOG_COLLECTION = "test_catalog_collection"
 
     @test_case(16, "Delete Documents")
     async def _test_delete_documents(self) -> bool:
@@ -135,6 +136,7 @@ class CleanupModule(BaseTestModule):
                     self.CUSTOM_METADATA_COLLECTION,
                     self.TEST_FILE_TYPES_COLLECTION,
                     self.CSV_DELETION_BATCH_COLLECTION,
+                    self.CATALOG_COLLECTION,
                 ]
             )
         )
@@ -183,6 +185,7 @@ class CleanupModule(BaseTestModule):
                     self.CUSTOM_METADATA_COLLECTION,
                     self.TEST_FILE_TYPES_COLLECTION,
                     self.CSV_DELETION_BATCH_COLLECTION,
+                    self.CATALOG_COLLECTION,
                 ]
             )
         )
@@ -229,17 +232,20 @@ class CleanupModule(BaseTestModule):
         """Delete documents from a collection"""
         async with aiohttp.ClientSession() as session:
             try:
-                params = {"collection_name": collection_name}
+                # DELETE /v1/documents expects query params:
+                # collection_name=<name>&document_names=<file1>&document_names=<file2>...
+                params = [("collection_name", collection_name)]
+                for name in file_names:
+                    params.append(("document_names", name))
                 logger.info(
                     f"🗑️ Deleting documents from collection '{collection_name}':"
                 )
-                logger.info(f"📋 Delete request params: {json.dumps(params, indent=2)}")
+                logger.info(f"📋 Delete request params: {params}")
                 logger.info(f"📁 Files to delete: {json.dumps(file_names, indent=2)}")
 
                 async with session.delete(
                     f"{self.ingestor_server_url}/v1/documents",
-                    params=params,
-                    json=file_names,
+                    params=params
                 ) as response:
                     result = await response.json()
                     if response.status == 200:
@@ -267,9 +273,10 @@ class CleanupModule(BaseTestModule):
                     f"📋 Collections to delete: {json.dumps(collection_names, indent=2)}"
                 )
 
-                async with session.delete(
-                    f"{self.ingestor_server_url}/v1/collections", json=collection_names
-                ) as response:
+                # DELETE /v1/collections expects query params:
+                # collection_names=<col1>&collection_names=<col2>...
+                params = [("collection_names", name) for name in collection_names]
+                async with session.delete(f"{self.ingestor_server_url}/v1/collections", params=params) as response:
                     result = await response.json()
                     if response.status == 200:
                         logger.info("✅ Collections deleted successfully:")
@@ -311,6 +318,7 @@ class CleanupModule(BaseTestModule):
                                 + [
                                     self.CUSTOM_METADATA_COLLECTION,
                                     self.TEST_FILE_TYPES_COLLECTION,
+                                    self.CATALOG_COLLECTION,
                                 ]
                             )
                         )

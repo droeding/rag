@@ -46,11 +46,19 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from starlette.status import HTTP_422_UNPROCESSABLE_ENTITY
 
-from nvidia_rag.ingestor_server.main import SERVER_MODE, NvidiaRAGIngestor
+from nvidia_rag.ingestor_server.main import Mode, NvidiaRAGIngestor
 from nvidia_rag.utils.configuration import NvidiaRAGConfig
+from nvidia_rag.utils.health_models import (
+    DatabaseHealthInfo,
+    IngestorHealthResponse,
+    NIMServiceHealthInfo,
+    ProcessingHealthInfo,
+    StorageHealthInfo,
+    TaskManagementHealthInfo,
+)
 from nvidia_rag.utils.metadata_validation import MetadataField
 
 logging.basicConfig(level=os.environ.get("LOGLEVEL", "INFO").upper())
@@ -98,68 +106,7 @@ EXAMPLE_DIR = "./"
 
 # Initialize configuration and ingestor
 CONFIG = NvidiaRAGConfig()
-NV_INGEST_INGESTOR = NvidiaRAGIngestor(mode=SERVER_MODE, config=CONFIG)
-
-
-# Define the service health models in server.py
-class BaseServiceHealthInfo(BaseModel):
-    """Base health info model with common fields for all services"""
-
-    service: str
-    url: str
-    status: str
-    latency_ms: float = 0
-    error: str | None = None
-
-
-class DatabaseHealthInfo(BaseServiceHealthInfo):
-    """Health info specific to database services"""
-
-    collections: int | None = None
-
-
-class StorageHealthInfo(BaseServiceHealthInfo):
-    """Health info specific to object storage services"""
-
-    buckets: int | None = None
-    message: str | None = None
-
-
-class NIMServiceHealthInfo(BaseServiceHealthInfo):
-    """Health info specific to NIM services (LLM, embeddings, etc.)"""
-
-    model: str | None = None
-    message: str | None = None
-    http_status: int | None = None
-
-
-class ProcessingHealthInfo(BaseServiceHealthInfo):
-    """Health info specific to document processing services"""
-
-    http_status: int | None = None
-
-
-class TaskManagementHealthInfo(BaseServiceHealthInfo):
-    """Health info specific to task management services"""
-
-    message: str | None = None
-
-
-class HealthResponse(BaseModel):
-    """Overall health response with specialized fields for each service type"""
-
-    message: str = Field(max_length=4096, pattern=r"[\s\S]*", default="Service is up.")
-    databases: list[DatabaseHealthInfo] = Field(default_factory=list)
-    object_storage: list[StorageHealthInfo] = Field(default_factory=list)
-    nim: list[NIMServiceHealthInfo] = Field(
-        default_factory=list
-    )  # NIM services (embeddings, LLM)
-    processing: list[ProcessingHealthInfo] = Field(
-        default_factory=list
-    )  # Document processing services
-    task_management: list[TaskManagementHealthInfo] = Field(
-        default_factory=list
-    )  # Task management services
+NV_INGEST_INGESTOR = NvidiaRAGIngestor(mode=Mode.SERVER, config=CONFIG)
 
 
 class SplitOptions(BaseModel):
@@ -173,6 +120,13 @@ class SplitOptions(BaseModel):
         description="Number of overlapping units between consecutive splits.",
     )
 
+def _extract_vdb_auth_token(request: Request) -> str | None:
+    """Extract bearer token from Authorization header (e.g., 'Bearer <token>')."""
+    auth_header = request.headers.get("Authorization") or request.headers.get("authorization")
+    if isinstance(auth_header, str) and auth_header.lower().startswith("bearer "):
+        return auth_header.split(" ", 1)[1].strip()
+    return None
+
 
 class CustomMetadata(BaseModel):
     """Custom metadata to be added to the document."""
@@ -183,6 +137,143 @@ class CustomMetadata(BaseModel):
     )
 
 
+class DocumentCatalogMetadata(BaseModel):
+    """Catalog metadata for a specific document during upload."""
+
+    filename: str = Field(..., description="Name of the file to apply metadata to.")
+    description: str | None = Field(
+        None, description="Description of the document for catalog purposes."
+    )
+    tags: list[str] | None = Field(
+        None, description="Tags for categorizing and discovering the document."
+    )
+
+
+class SummaryOptions(BaseModel):
+    """Advanced options for summary generation (used with generate_summary=True).
+
+    Page Filter formats:
+    - Ranges: [[1, 10], [20, 30]] for pages 1-10 and 20-30
+    - Negative ranges: [[-10, -1]] for last 10 pages (Pythonic indexing where -1 is last page)
+    - Even/odd: "even" or "odd" for all even or odd pages
+
+    Examples:
+    - [[1, 10], [-5, -1]] selects first 10 pages and last 5 pages
+    - [[-1, -1]] selects only the last page
+    """
+
+    page_filter: list[list[int]] | str | None = Field(
+        None,
+        description=(
+            "Page selection specification for summarization. Supports: "
+            "list[list[int]] (ranges as [start,end] with negative indexing supported), "
+            "str ('even' or 'odd'). Only applicable when generate_summary is enabled."
+        ),
+        examples=[
+            [[1, 10]],
+            [[1, 10], [20, 30]],
+            [[-10, -1]],
+            [[1, 10], [-5, -1]],
+            "even",
+            "odd",
+        ],
+    )
+
+    shallow_summary: bool = Field(
+        default=False,
+        description=(
+            "Enable fast summary generation using text-only extraction. "
+            "When True, performs text-only NV-Ingest extraction first to generate summaries quickly, "
+            "then continues with full multimodal ingestion (tables, images, charts) for VDB. "
+            "Summary generation starts immediately with text-only results while full ingestion proceeds in parallel. "
+            "Default: False (summary generated after full multimodal ingestion)."
+        ),
+    )
+
+    summarization_strategy: str | None = Field(
+        default=None,
+        description=(
+            "Summarization strategy for combining document chunks. "
+            "'single': Summarize entire document in one pass (truncates if exceeds max_chunk_length). "
+            "'hierarchical': Parallel tree-based summarization (fastest for large documents). "
+            "If not specified, uses default sequential iterative processing."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def validate_page_filter_and_strategy(self) -> "SummaryOptions":
+        """Validate page_filter format and summarization_strategy."""
+        # Validate page_filter
+        if self.page_filter is not None:
+            page_filter = self.page_filter
+
+            if isinstance(page_filter, str):
+                if page_filter.lower() not in ["even", "odd"]:
+                    raise ValueError(
+                        f"Invalid page_filter string '{page_filter}'. Supported: 'even', 'odd'"
+                    )
+                self.page_filter = page_filter.lower()
+
+            elif isinstance(page_filter, list):
+                if not page_filter:
+                    raise ValueError("Page filter range list cannot be empty")
+
+                # Must be list of lists (ranges)
+                if not all(isinstance(item, list) for item in page_filter):
+                    raise ValueError(
+                        "Page filter must contain ranges as [start, end]. "
+                        "Got mixed types or non-list items."
+                    )
+
+                for i, range_item in enumerate(page_filter):
+                    if len(range_item) != 2:
+                        raise ValueError(
+                            f"Range {i} must have exactly 2 elements [start, end], got {len(range_item)}"
+                        )
+                    start, end = range_item
+                    if not isinstance(start, int) or not isinstance(end, int):
+                        raise ValueError(
+                            f"Range {i} must contain integers, got [{type(start).__name__}, {type(end).__name__}]"
+                        )
+                    # Validate page numbers
+                    if start == 0 or end == 0:
+                        raise ValueError(
+                            f"Range {i}: page numbers cannot be 0. Use 1-based indexing or negative for last pages."
+                        )
+                    # For negative ranges: start must be <= end (e.g., [-10, -1] is valid, [-1, -10] is not)
+                    if start < 0 and end < 0 and start > end:
+                        raise ValueError(
+                            f"Range {i}: invalid negative range [{start}, {end}]. "
+                            f"Use [-10, -1] for last 10 pages, not [-1, -10]."
+                        )
+                    # For positive ranges: start must be <= end
+                    if start > 0 and end > 0 and start > end:
+                        raise ValueError(
+                            f"Range {i}: start must be <= end, got [{start}, {end}]"
+                        )
+                    # Mixed positive/negative not allowed
+                    if (start < 0 and end > 0) or (start > 0 and end < 0):
+                        raise ValueError(
+                            f"Range {i}: cannot mix positive and negative indexing in same range. Got [{start}, {end}]"
+                        )
+            else:
+                raise ValueError(
+                    f"Invalid page_filter type: {type(page_filter).__name__}. "
+                    f"Expected: list[list[int]] (ranges) or str ('even'/'odd')"
+                )
+
+        # Validate summarization_strategy
+        if self.summarization_strategy is not None:
+            allowed_strategies = ["single", "hierarchical"]
+            if self.summarization_strategy not in allowed_strategies:
+                raise ValueError(
+                    f"Invalid summarization_strategy: '{self.summarization_strategy}'. "
+                    f"Allowed values: {allowed_strategies}"
+                )
+
+        return self
+
+
 class DocumentUploadRequest(BaseModel):
     """Request model for uploading and processing documents."""
 
@@ -191,6 +282,16 @@ class DocumentUploadRequest(BaseModel):
         description="URL of the vector database endpoint.",
         exclude=True,  # WAR to hide it from openapi schema
     )
+
+    @model_validator(mode="after")
+    def validate_summary_configuration(self) -> "DocumentUploadRequest":
+        """Validate that summary_options is only used when generate_summary is True."""
+        if self.summary_options and not self.generate_summary:
+            raise ValueError(
+                "summary_options can only be provided when generate_summary=True. "
+                "Either set generate_summary=True or remove summary_options."
+            )
+        return self
 
     collection_name: str = Field(
         "multimodal_data", description="Name of the collection in the vector database."
@@ -210,6 +311,16 @@ class DocumentUploadRequest(BaseModel):
     generate_summary: bool = Field(
         default=False,
         description="Enable/disable summary generation for each uploaded document.",
+    )
+
+    documents_catalog_metadata: list[DocumentCatalogMetadata] = Field(
+        default_factory=list,
+        description="Catalog metadata (description, tags) for specific documents. Optional per-document catalog information.",
+    )
+
+    summary_options: SummaryOptions | None = Field(
+        None,
+        description="Advanced options for summary generation (e.g., page filtering). Only used when generate_summary is True.",
     )
 
     # Reserved for future use
@@ -309,6 +420,7 @@ class UploadedCollection(BaseModel):
         {}, description="Collection info of the collection."
     )
 
+
 class CollectionListResponse(BaseModel):
     """Response model for uploading a document."""
 
@@ -339,6 +451,18 @@ class CreateCollectionRequest(BaseModel):
     )
     metadata_schema: list[MetadataField] = Field(
         [], description="Metadata schema of the collection."
+    )
+    description: str = Field(
+        "", description="Human-readable description of the collection"
+    )
+    tags: list[str] = Field([], description="Tags for categorization and search")
+    owner: str = Field("", description="Owner team or person")
+    created_by: str = Field("", description="Username/email of creator")
+    business_domain: str = Field(
+        "", description="Business domain (Finance, Engineering, HR, Legal, etc.)"
+    )
+    status: str = Field(
+        "Active", description="Collection status (Active, Archived, Stale, Pending)"
     )
 
 
@@ -380,6 +504,30 @@ class CreateCollectionResponse(BaseModel):
     collection_name: str = Field(..., description="Name of the collection.")
 
 
+class UpdateCollectionMetadataRequest(BaseModel):
+    """Request model for updating collection metadata."""
+
+    description: str | None = Field(None, description="Updated description")
+    tags: list[str] | None = Field(None, description="Updated tags")
+    owner: str | None = Field(None, description="Updated owner")
+    business_domain: str | None = Field(None, description="Updated business domain")
+    status: str | None = Field(None, description="Updated status")
+
+
+class UpdateDocumentMetadataRequest(BaseModel):
+    """Request model for updating document metadata."""
+
+    description: str | None = Field(None, description="Updated description")
+    tags: list[str] | None = Field(None, description="Updated tags")
+
+
+class UpdateMetadataResponse(BaseModel):
+    """Response model for metadata update operations."""
+
+    message: str = Field(..., description="Status message")
+    collection_name: str = Field(..., description="Collection name")
+
+
 @app.exception_handler(RequestValidationError)
 async def request_validation_exception_handler(
     request: Request, exc: RequestValidationError
@@ -397,7 +545,7 @@ async def request_validation_exception_handler(
 
 @app.get(
     "/health",
-    response_model=HealthResponse,
+    response_model=IngestorHealthResponse,
     tags=["Health APIs"],
     responses={
         500: {
@@ -422,50 +570,14 @@ async def health_check(check_dependencies: bool = False):
     """
 
     logger.info("Checking service health...")
-    health_results = await NV_INGEST_INGESTOR.health(check_dependencies)
-    response = HealthResponse(**health_results)
+    response = await NV_INGEST_INGESTOR.health(check_dependencies)
 
     # Only perform detailed service checks if requested
     if check_dependencies:
         try:
             from nvidia_rag.ingestor_server.health import print_health_report
 
-            print_health_report(health_results)
-
-            # Process databases
-            if "databases" in health_results:
-                response.databases = [
-                    DatabaseHealthInfo(**service)
-                    for service in health_results["databases"]
-                ]
-
-            # Process object_storage
-            if "object_storage" in health_results:
-                response.object_storage = [
-                    StorageHealthInfo(**service)
-                    for service in health_results["object_storage"]
-                ]
-
-            # Process nim services
-            if "nim" in health_results:
-                response.nim = [
-                    NIMServiceHealthInfo(**service) for service in health_results["nim"]
-                ]
-
-            # Process processing services
-            if "processing" in health_results:
-                response.processing = [
-                    ProcessingHealthInfo(**service)
-                    for service in health_results["processing"]
-                ]
-
-            # Process task_management services
-            if "task_management" in health_results:
-                response.task_management = [
-                    TaskManagementHealthInfo(**service)
-                    for service in health_results["task_management"]
-                ]
-
+            print_health_report(response)
         except Exception as e:
             logger.error(f"Error during dependency health checks: {str(e)}")
     else:
@@ -519,8 +631,9 @@ async def parse_json_data(
     },
 )
 async def upload_document(
+    request: Request,
     documents: list[UploadFile] = File(...),
-    request: DocumentUploadRequest = Depends(parse_json_data),
+    payload: DocumentUploadRequest = Depends(parse_json_data),
 ) -> UploadDocumentResponse | IngestionTaskResponse:
     """Upload a document to the vector store."""
 
@@ -528,17 +641,21 @@ async def upload_document(
         raise Exception("No files provided for uploading.")
 
     try:
+        # Extract bearer token from Authorization header (e.g., "Bearer <token>")
+        vdb_auth_token = _extract_vdb_auth_token(request)
+
         # Store all provided file paths in a temporary directory (only unique files)
         all_file_paths, duplicate_validation_errors = await process_file_paths(
-            documents, request.collection_name
+            documents, payload.collection_name
         )
 
         response_dict = await NV_INGEST_INGESTOR.upload_documents(
             filepaths=all_file_paths,
-            **request.model_dump(),
+            vdb_auth_token=vdb_auth_token,
+            **payload.model_dump(),
             additional_validation_errors=duplicate_validation_errors,
         )
-        if not request.blocking:
+        if not payload.blocking:
             return JSONResponse(
                 content=IngestionTaskResponse(**response_dict).model_dump(),
                 status_code=200,
@@ -605,23 +722,28 @@ async def get_task_status(task_id: str):
     },
 )
 async def update_documents(
+    request: Request,
     documents: list[UploadFile] = File(...),
-    request: DocumentUploadRequest = Depends(parse_json_data),
+    payload: DocumentUploadRequest = Depends(parse_json_data),
 ) -> DocumentListResponse:
     """Upload a document to the vector store. If the document already exists, it will be replaced."""
 
     try:
+        # Extract bearer token from Authorization header (e.g., "Bearer <token>")
+        vdb_auth_token = _extract_vdb_auth_token(request)
+
         # Store all provided file paths in a temporary directory (only unique files)
         all_file_paths, duplicate_validation_errors = await process_file_paths(
-            documents, request.collection_name
+            documents, payload.collection_name
         )
 
         response_dict = await NV_INGEST_INGESTOR.update_documents(
             filepaths=all_file_paths,
-            **request.model_dump(),
+            vdb_auth_token=vdb_auth_token,
+            **payload.model_dump(),
             additional_validation_errors=duplicate_validation_errors,
         )
-        if not request.blocking:
+        if not payload.blocking:
             return JSONResponse(
                 content=IngestionTaskResponse(**response_dict).model_dump(),
                 status_code=200,
@@ -668,7 +790,7 @@ async def update_documents(
     },
 )
 async def get_documents(
-    _: Request,
+    request: Request,
     collection_name: str = os.getenv("COLLECTION_NAME", ""),
     vdb_endpoint: str = Query(
         default=os.getenv("APP_VECTORSTORE_URL"), include_in_schema=False
@@ -676,7 +798,9 @@ async def get_documents(
 ) -> DocumentListResponse:
     """Get list of document ingested in vectorstore."""
     try:
-        documents = NV_INGEST_INGESTOR.get_documents(collection_name, vdb_endpoint)
+        # Extract vdb auth token and pass through to backend
+        vdb_auth_token = _extract_vdb_auth_token(request)
+        documents = NV_INGEST_INGESTOR.get_documents(collection_name, vdb_endpoint, vdb_auth_token)
         return DocumentListResponse(**documents)
 
     except asyncio.CancelledError as e:
@@ -716,8 +840,8 @@ async def get_documents(
     },
 )
 async def delete_documents(
-    _: Request,
-    document_names: list[str] = None,
+    request: Request,
+    document_names: list[str] | None = None,
     collection_name: str = os.getenv("COLLECTION_NAME"),
     vdb_endpoint: str = Query(
         default=os.getenv("APP_VECTORSTORE_URL"), include_in_schema=False
@@ -727,11 +851,14 @@ async def delete_documents(
         document_names = []
     """Delete a document from vectorstore."""
     try:
+        # Extract vdb auth token and pass through to backend
+        vdb_auth_token = _extract_vdb_auth_token(request)
         response = NV_INGEST_INGESTOR.delete_documents(
             document_names=document_names,
             collection_name=collection_name,
             vdb_endpoint=vdb_endpoint,
             include_upload_path=True,
+            vdb_auth_token=vdb_auth_token,
         )
         return DocumentListResponse(**response)
 
@@ -774,6 +901,7 @@ async def delete_documents(
     },
 )
 async def get_collections(
+    request: Request,
     vdb_endpoint: str = Query(
         default=os.getenv("APP_VECTORSTORE_URL"), include_in_schema=False
     ),
@@ -783,7 +911,9 @@ async def get_collections(
     Returns a list of collection names.
     """
     try:
-        response = NV_INGEST_INGESTOR.get_collections(vdb_endpoint)
+        # Extract vdb auth token and pass through to backend
+        vdb_auth_token = _extract_vdb_auth_token(request)
+        response = NV_INGEST_INGESTOR.get_collections(vdb_endpoint, vdb_auth_token)
         return CollectionListResponse(**response)
 
     except asyncio.CancelledError as e:
@@ -827,10 +957,11 @@ async def get_collections(
     description="This endpoint is deprecated. Use POST /collection instead. Custom metadata is not supported in this endpoint.",
 )
 async def create_collections(
+    request: Request,
     vdb_endpoint: str = Query(
         default=os.getenv("APP_VECTORSTORE_URL"), include_in_schema=False
     ),
-    collection_names: list[str] = None,
+    collection_names: list[str] | None = None,
     collection_type: str = "text",
     embedding_dimension: int = 2048,
 ) -> CollectionsResponse:
@@ -845,8 +976,10 @@ async def create_collections(
         "Please use POST /collection instead. Custom metadata is not supported in this endpoint."
     )
     try:
+        # Extract vdb auth token and pass through to backend
+        vdb_auth_token = _extract_vdb_auth_token(request)
         response = NV_INGEST_INGESTOR.create_collections(
-            collection_names, vdb_endpoint, embedding_dimension
+            collection_names, vdb_endpoint, embedding_dimension, vdb_auth_token
         )
         return CollectionsResponse(**response)
 
@@ -888,17 +1021,27 @@ async def create_collections(
         },
     },
 )
-async def create_collection(data: CreateCollectionRequest) -> CreateCollectionResponse:
+
+async def create_collection(request: Request, data: CreateCollectionRequest) -> CreateCollectionResponse:
     """
-    Endpoint to create a collection from the Milvus server.
+    Endpoint to create a collection with catalog metadata.
     Returns status message.
     """
     try:
+        # Extract vdb auth token and pass through to backend
+        vdb_auth_token = _extract_vdb_auth_token(request)
         response = NV_INGEST_INGESTOR.create_collection(
             collection_name=data.collection_name,
             vdb_endpoint=data.vdb_endpoint,
             embedding_dimension=data.embedding_dimension,
             metadata_schema=[field.model_dump() for field in data.metadata_schema],
+            description=data.description,
+            tags=data.tags,
+            owner=data.owner,
+            created_by=data.created_by,
+            business_domain=data.business_domain,
+            status=data.status,
+            vdb_auth_token=vdb_auth_token,
         )
         return CreateCollectionResponse(**response)
 
@@ -913,6 +1056,117 @@ async def create_collection(data: CreateCollectionRequest) -> CreateCollectionRe
             content={
                 "message": f"Error occurred while creating collection. Error: {e}"
             },
+            status_code=500,
+        )
+
+
+@app.patch(
+    "/collections/{collection_name}/metadata",
+    tags=["Vector DB APIs"],
+    response_model=UpdateMetadataResponse,
+    responses={
+        499: {
+            "description": "Client Closed Request",
+            "content": {
+                "application/json": {
+                    "example": {"detail": "The client cancelled the request"}
+                }
+            },
+        },
+        500: {
+            "description": "Internal Server Error",
+            "content": {
+                "application/json": {
+                    "example": {"detail": "Internal server error occurred"}
+                }
+            },
+        },
+    },
+)
+async def update_collection_metadata(
+    collection_name: str,
+    data: UpdateCollectionMetadataRequest,
+) -> UpdateMetadataResponse:
+    """Endpoint to update collection catalog metadata."""
+    try:
+        response = NV_INGEST_INGESTOR.update_collection_metadata(
+            collection_name=collection_name,
+            description=data.description,
+            tags=data.tags,
+            owner=data.owner,
+            business_domain=data.business_domain,
+            status=data.status,
+        )
+        return UpdateMetadataResponse(**response)
+
+    except asyncio.CancelledError as e:
+        logger.warning(
+            f"Request cancelled while updating collection metadata. {str(e)}"
+        )
+        return JSONResponse(
+            content={"message": "Request was cancelled by the client."}, status_code=499
+        )
+    except Exception as e:
+        logger.error(
+            "Error from PATCH /collections/{collection_name}/metadata endpoint. Error: %s",
+            e,
+        )
+        return JSONResponse(
+            content={"message": f"Error updating collection metadata. Error: {e}"},
+            status_code=500,
+        )
+
+
+@app.patch(
+    "/collections/{collection_name}/documents/{document_name}/metadata",
+    tags=["Vector DB APIs"],
+    response_model=UpdateMetadataResponse,
+    responses={
+        499: {
+            "description": "Client Closed Request",
+            "content": {
+                "application/json": {
+                    "example": {"detail": "The client cancelled the request"}
+                }
+            },
+        },
+        500: {
+            "description": "Internal Server Error",
+            "content": {
+                "application/json": {
+                    "example": {"detail": "Internal server error occurred"}
+                }
+            },
+        },
+    },
+)
+async def update_document_metadata(
+    collection_name: str,
+    document_name: str,
+    data: UpdateDocumentMetadataRequest,
+) -> UpdateMetadataResponse:
+    """Endpoint to update document catalog metadata."""
+    try:
+        response = NV_INGEST_INGESTOR.update_document_metadata(
+            collection_name=collection_name,
+            document_name=document_name,
+            description=data.description,
+            tags=data.tags,
+        )
+        return UpdateMetadataResponse(**response)
+
+    except asyncio.CancelledError as e:
+        logger.warning(f"Request cancelled while updating document metadata. {str(e)}")
+        return JSONResponse(
+            content={"message": "Request was cancelled by the client."}, status_code=499
+        )
+    except Exception as e:
+        logger.error(
+            "Error from PATCH /collections/{collection_name}/documents/{document_name}/metadata endpoint. Error: %s",
+            e,
+        )
+        return JSONResponse(
+            content={"message": f"Error updating document metadata. Error: {e}"},
             status_code=500,
         )
 
@@ -941,10 +1195,11 @@ async def create_collection(data: CreateCollectionRequest) -> CreateCollectionRe
     },
 )
 async def delete_collections(
+    request: Request,
     vdb_endpoint: str = Query(
         default=os.getenv("APP_VECTORSTORE_URL"), include_in_schema=False
     ),
-    collection_names: list[str] = None,
+    collection_names: list[str] = Query(default=None),
 ) -> CollectionsResponse:
     if collection_names is None:
         collection_names = [os.getenv("COLLECTION_NAME")]
@@ -953,8 +1208,10 @@ async def delete_collections(
     Returns status message.
     """
     try:
+        # Extract vdb auth token and pass through to backend
+        vdb_auth_token = _extract_vdb_auth_token(request)
         response = NV_INGEST_INGESTOR.delete_collections(
-            collection_names=collection_names, vdb_endpoint=vdb_endpoint
+            collection_names=collection_names, vdb_endpoint=vdb_endpoint, vdb_auth_token=vdb_auth_token
         )
         return CollectionsResponse(**response)
 

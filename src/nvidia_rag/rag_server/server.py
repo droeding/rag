@@ -52,6 +52,12 @@ from nvidia_rag.rag_server.response_generator import (
     error_response_generator,
 )
 from nvidia_rag.utils.configuration import NvidiaRAGConfig
+from nvidia_rag.utils.health_models import (
+    DatabaseHealthInfo,
+    NIMServiceHealthInfo,
+    RAGHealthResponse,
+    StorageHealthInfo,
+)
 
 logging.basicConfig(level=os.environ.get("LOGLEVEL", "INFO").upper())
 logger = logging.getLogger(__name__)
@@ -69,6 +75,8 @@ default_ignore_eos = model_params["ignore_eos"]
 default_max_tokens = model_params["max_tokens"]
 default_temperature = model_params["temperature"]
 default_top_p = model_params["top_p"]
+default_min_thinking_tokens = model_params.get("min_thinking_tokens", 1)
+default_max_thinking_tokens = model_params.get("max_thinking_tokens", 8192)
 
 logger.debug("Default LLM parameters:")
 logger.debug(f"  min_tokens: {default_min_tokens}")
@@ -76,6 +84,8 @@ logger.debug(f"  ignore_eos: {default_ignore_eos}")
 logger.debug(f"  max_tokens: {default_max_tokens}")
 logger.debug(f"  temperature: {default_temperature}")
 logger.debug(f"  top_p: {default_top_p}")
+logger.debug(f"  min_thinking_tokens: {default_min_thinking_tokens}")
+logger.debug(f"  max_thinking_tokens: {default_max_thinking_tokens}")
 
 tags_metadata = [
     {
@@ -136,6 +146,14 @@ def validate_confidence_threshold_field(confidence_threshold: float) -> float:
     return confidence_threshold
 
 
+def _extract_vdb_auth_token(request: Request) -> str | None:
+    """Extract bearer token from Authorization header (e.g., 'Bearer <token>')."""
+    auth_header = request.headers.get("Authorization") or request.headers.get("authorization")
+    if isinstance(auth_header, str) and auth_header.lower().startswith("bearer "):
+        return auth_header.split(" ", 1)[1].strip()
+    return None
+
+
 class Prompt(BaseModel):
     """Definition of the Prompt API data type."""
 
@@ -185,6 +203,20 @@ class Prompt(BaseModel):
         " and generation will simply stop at the number of tokens specified.",
         ge=0,
         le=128000,
+        format="int64",
+    )
+    min_thinking_tokens: int = Field(
+        default=default_min_thinking_tokens,
+        description="Minimum number of thinking tokens to allocate for reasoning models. "
+        "Enable thinking mode if either min_thinking_tokens or max_thinking_tokens is provided.",
+        ge=0,
+        format="int64",
+    )
+    max_thinking_tokens: int = Field(
+        default=default_max_thinking_tokens,
+        description="Maximum number of thinking tokens to allocate for reasoning models. "
+        "Enable thinking mode if either min_thinking_tokens or max_thinking_tokens is provided.",
+        ge=0,
         format="int64",
     )
     reranker_top_k: int = Field(
@@ -483,58 +515,35 @@ class DocumentSearch(BaseModel):
 
 # Define the summary response model
 class SummaryResponse(BaseModel):
-    """Represents a summary of a document."""
+    """Represents a summary of a document with status tracking."""
 
-    message: str = Field(default="", description="Message of the summary")
-
-    status: str = Field(default="", description="Status of the summary")
-
-    summary: str = Field(default="", description="Summary of the document")
+    message: str = Field(
+        default="", description="Message describing the summary status"
+    )
+    status: str = Field(
+        default="",
+        description="Status of the summary: SUCCESS (completed), PENDING (queued), IN_PROGRESS (generating), FAILED (error occurred), or NOT_FOUND (never requested)",
+    )
+    summary: str = Field(
+        default="", description="Summary content (only present if status is SUCCESS)"
+    )
     file_name: str = Field(default="", description="Name of the document")
     collection_name: str = Field(default="", description="Name of the collection")
-
-
-# Define the service health models in server.py
-class BaseServiceHealthInfo(BaseModel):
-    """Base health info model with common fields for all services"""
-
-    service: str
-    url: str
-    status: str
-    latency_ms: float = 0
-    error: str | None = None
-
-
-class DatabaseHealthInfo(BaseServiceHealthInfo):
-    """Health info specific to database services"""
-
-    collections: int | None = None
-
-
-class StorageHealthInfo(BaseServiceHealthInfo):
-    """Health info specific to object storage services"""
-
-    buckets: int | None = None
-    message: str | None = None
-
-
-class NIMServiceHealthInfo(BaseServiceHealthInfo):
-    """Health info specific to NIM services (LLM, embeddings, etc.)"""
-
-    model: str | None = None
-    message: str | None = None
-    http_status: int | None = None
-
-
-class HealthResponse(BaseModel):
-    """Overall health response with specialized fields for each service type"""
-
-    message: str = Field(max_length=4096, pattern=r"[\s\S]*", default="Service is up.")
-    databases: list[DatabaseHealthInfo] = Field(default_factory=list)
-    object_storage: list[StorageHealthInfo] = Field(default_factory=list)
-    nim: list[NIMServiceHealthInfo] = Field(
-        default_factory=list
-    )  # Unified category for NIM services
+    error: str | None = Field(
+        default=None, description="Error details if status is FAILED"
+    )
+    started_at: str | None = Field(
+        default=None, description="ISO format timestamp when generation started"
+    )
+    completed_at: str | None = Field(
+        default=None, description="ISO format timestamp when generation completed"
+    )
+    updated_at: str | None = Field(
+        default=None, description="ISO format timestamp of last status update"
+    )
+    progress: dict[str, Any] | None = Field(
+        default=None, description="Progress information if status is IN_PROGRESS"
+    )
 
 
 @app.exception_handler(RequestValidationError)
@@ -549,7 +558,7 @@ async def request_validation_exception_handler(
 
 @app.get(
     "/health",
-    response_model=HealthResponse,
+    response_model=RAGHealthResponse,
     tags=["Health APIs"],
     responses={
         500: {
@@ -574,34 +583,12 @@ async def health_check(check_dependencies: bool = False):
     """
 
     logger.info("Checking service health...")
-    health_results = await NVIDIA_RAG.health(check_dependencies)
-    response = HealthResponse(**health_results)
+    response = await NVIDIA_RAG.health(check_dependencies)
 
     # Only perform detailed service checks if requested
     if check_dependencies:
         try:
-            print_health_report(health_results)
-
-            # Process databases
-            if "databases" in health_results:
-                response.databases = [
-                    DatabaseHealthInfo(**service)
-                    for service in health_results["databases"]
-                ]
-
-            # Process object_storage
-            if "object_storage" in health_results:
-                response.object_storage = [
-                    StorageHealthInfo(**service)
-                    for service in health_results["object_storage"]
-                ]
-
-            # Process nim services
-            if "nim" in health_results:
-                response.nim = [
-                    NIMServiceHealthInfo(**service) for service in health_results["nim"]
-                ]
-
+            print_health_report(response)
         except Exception as e:
             logger.error(f"Error during dependency health checks: {str(e)}")
     else:
@@ -698,6 +685,8 @@ async def generate_answer(request: Request, prompt: Prompt) -> StreamingResponse
         "max_tokens": prompt.max_tokens,
         "min_tokens": prompt.min_tokens,
         "ignore_eos": prompt.ignore_eos,
+        "min_thinking_tokens": prompt.min_thinking_tokens,
+        "max_thinking_tokens": prompt.max_thinking_tokens,
         "stop": prompt.stop,
         "reranker_top_k": prompt.reranker_top_k,
         "vdb_top_k": prompt.vdb_top_k,
@@ -762,15 +751,20 @@ async def generate_answer(request: Request, prompt: Prompt) -> StreamingResponse
                 # Fallback for other content types
                 messages_dict.append({"role": msg.role, "content": msg.content})
 
-        # Get the streaming generator from NVIDIA_RAG.generate
+        # Extract bearer token from Authorization header (e.g., "Bearer <token>")
+        vdb_auth_token = _extract_vdb_auth_token(request)
+
         rag_response = NVIDIA_RAG.generate(
             messages=messages_dict,
             use_knowledge_base=prompt.use_knowledge_base,
             temperature=prompt.temperature,
             top_p=prompt.top_p,
+            vdb_auth_token=vdb_auth_token,
             min_tokens=prompt.min_tokens,
             ignore_eos=prompt.ignore_eos,
             max_tokens=prompt.max_tokens,
+            min_thinking_tokens=prompt.min_thinking_tokens,
+            max_thinking_tokens=prompt.max_thinking_tokens,
             stop=prompt.stop,
             reranker_top_k=prompt.reranker_top_k,
             vdb_top_k=prompt.vdb_top_k,
@@ -970,9 +964,13 @@ async def document_search(
                     content_list.append(content_item)
             query_processed = content_list
 
+        # Extract bearer token from Authorization header (e.g., "Bearer <token>")
+        vdb_auth_token = _extract_vdb_auth_token(request)
+
         return NVIDIA_RAG.search(
             query=query_processed,
             messages=messages_dict,
+            vdb_auth_token=vdb_auth_token,
             reranker_top_k=data.reranker_top_k,
             vdb_top_k=data.vdb_top_k,
             collection_name=data.collection_name,
@@ -1123,23 +1121,48 @@ async def get_summary(
             timeout=timeout,
         )
 
-        if response.get("status") == "FAILED":
+        status = response.get("status")
+
+        # Map status to appropriate HTTP status codes
+        if status == "SUCCESS":
+            return JSONResponse(content=response, status_code=ErrorCodeMapping.SUCCESS)
+        elif status == "NOT_FOUND":
             return JSONResponse(
                 content=response, status_code=ErrorCodeMapping.NOT_FOUND
             )
-        elif response.get("status") == "TIMEOUT":
-            return JSONResponse(
-                content=response, status_code=ErrorCodeMapping.REQUEST_TIMEOUT
-            )
-        elif response.get("status") == "SUCCESS":
-            return JSONResponse(content=response, status_code=ErrorCodeMapping.SUCCESS)
-        elif response.get("status") == "ERROR":
+        elif status in ["PENDING", "IN_PROGRESS"]:
+            # Return 202 Accepted for in-progress tasks
+            return JSONResponse(content=response, status_code=ErrorCodeMapping.ACCEPTED)
+        elif status == "FAILED":
+            # Check if it's a timeout vs other failure
+            error = response.get("error", "")
+            if "timeout" in error.lower():
+                return JSONResponse(
+                    content=response, status_code=ErrorCodeMapping.REQUEST_TIMEOUT
+                )
+            else:
+                return JSONResponse(
+                    content=response, status_code=ErrorCodeMapping.INTERNAL_SERVER_ERROR
+                )
+        else:
+            # Unknown status
+            logger.warning(f"Unknown summary status: {status}")
             return JSONResponse(
                 content=response, status_code=ErrorCodeMapping.INTERNAL_SERVER_ERROR
             )
 
+    except asyncio.CancelledError as e:
+        logger.warning(f"Request cancelled while getting summary: {e}")
+        return JSONResponse(
+            content={"message": "Request was cancelled by the client"},
+            status_code=ErrorCodeMapping.CLIENT_CLOSED_REQUEST,
+        )
     except Exception as e:
-        logger.error("Error from GET /summary endpoint. Error details: %s", e)
+        logger.error(
+            "Error from GET /summary endpoint. Error details: %s",
+            e,
+            exc_info=logger.getEffectiveLevel() <= logging.DEBUG,
+        )
         return JSONResponse(
             content={
                 "message": "Error occurred while getting summary.",
