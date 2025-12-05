@@ -42,27 +42,29 @@ services:
       # ef: Parameter controlling query time/accuracy trade-off. Higher ef leads to more accurate but slower search.
       APP_VECTORSTORE_EF: ${APP_VECTORSTORE_EF:-100} # Must be greater or equal to VECTOR_DB_TOPK
       # vectorstore collection name to store embeddings
-      COLLECTION_NAME: ${COLLECTION_NAME:-multimodal_data}
+      # Leave default empty; UI/request sets collection_names
+      COLLECTION_NAME: ${COLLECTION_NAME:-}
       APP_RETRIEVER_SCORETHRESHOLD: 0.25
       # Top K from vector DB, which goes as input to reranker model if enabled, else goes to LLM prompt
-      VECTOR_DB_TOPK: ${VECTOR_DB_TOPK:-100}
+      VECTOR_DB_TOPK: ${VECTOR_DB_TOPK:-10}
 
       ##===LLM Model specific configurations===
-      APP_LLM_MODELNAME: ${APP_LLM_MODELNAME:-"nvidia/llama-3.3-nemotron-super-49b-v1.5"}
+      APP_LLM_MODELNAME: ${APP_LLM_MODELNAME:-"nvidia/NVIDIA-Nemotron-Nano-12B-v2"}
+      LLM_MODEL: ${LLM_MODEL:-"nvidia/NVIDIA-Nemotron-Nano-12B-v2"}
       # url on which llm model is hosted. If "", Nvidia hosted API is used
       APP_LLM_SERVERURL: ${APP_LLM_SERVERURL-"nim-llm:8000"}
       # LLM model parameters
-      LLM_MAX_TOKENS: ${LLM_MAX_TOKENS:-32768}
+      LLM_MAX_TOKENS: ${LLM_MAX_TOKENS:-4096}
       LLM_TEMPERATURE: ${LLM_TEMPERATURE:-0}
       LLM_TOP_P: ${LLM_TOP_P:-1.0}
 
       ##===Query Rewriter Model specific configurations===
-      APP_QUERYREWRITER_MODELNAME: ${APP_QUERYREWRITER_MODELNAME:-"nvidia/llama-3.3-nemotron-super-49b-v1.5"}
+      APP_QUERYREWRITER_MODELNAME: ${APP_QUERYREWRITER_MODELNAME:-"nvidia/NVIDIA-Nemotron-Nano-12B-v2"}
       # url on which query rewriter model is hosted. If "", Nvidia hosted API is used
       APP_QUERYREWRITER_SERVERURL: ${APP_QUERYREWRITER_SERVERURL-"nim-llm:8000"}
 
       ##===Filter Expression Generator Model specific configurations===
-      APP_FILTEREXPRESSIONGENERATOR_MODELNAME: ${APP_FILTEREXPRESSIONGENERATOR_MODELNAME:-"nvidia/llama-3.3-nemotron-super-49b-v1.5"}
+      APP_FILTEREXPRESSIONGENERATOR_MODELNAME: ${APP_FILTEREXPRESSIONGENERATOR_MODELNAME:-"nvidia/NVIDIA-Nemotron-Nano-12B-v2"}
       # url on which filter expression generator model is hosted. If "", Nvidia hosted API is used
       APP_FILTEREXPRESSIONGENERATOR_SERVERURL: ${APP_FILTEREXPRESSIONGENERATOR_SERVERURL-"nim-llm:8000"}
       # enable filter expression generator for natural language to filter expression conversion
@@ -80,7 +82,7 @@ services:
       # url on which ranking model is hosted. If "", Nvidia hosted API is used
       APP_RANKING_SERVERURL: ${APP_RANKING_SERVERURL-"nemoretriever-ranking-ms:8000"}
       APP_RANKING_MODELNAME: ${APP_RANKING_MODELNAME:-"nvidia/llama-3.2-nv-rerankqa-1b-v2"}
-      ENABLE_RERANKER: ${ENABLE_RERANKER:-True}
+      ENABLE_RERANKER: true
       # Default confidence threshold for filtering documents by reranker relevance scores (0.0 to 1.0)
       RERANKER_CONFIDENCE_THRESHOLD: ${RERANKER_CONFIDENCE_THRESHOLD:-0.0}
 
@@ -108,7 +110,7 @@ services:
       LLM_API_KEY: ${LLM_API_KEY:-""}
 
       # Number of document chunks to insert in LLM prompt, used only when ENABLE_RERANKER is set to True
-      APP_RETRIEVER_TOPK: ${APP_RETRIEVER_TOPK:-10}
+      APP_RETRIEVER_TOPK: ${APP_RETRIEVER_TOPK:-5}
 
       # Log level for server, supported level NOTSET, DEBUG, INFO, WARN, ERROR, CRITICAL
       LOGLEVEL: ${LOGLEVEL:-INFO}
@@ -153,7 +155,7 @@ services:
       # Minimum groundedness score threshold (0-2)
       RESPONSE_GROUNDEDNESS_THRESHOLD: ${RESPONSE_GROUNDEDNESS_THRESHOLD:-1}
       # reflection llm
-      REFLECTION_LLM: ${REFLECTION_LLM:-"nvidia/llama-3.3-nemotron-super-49b-v1.5"}
+      REFLECTION_LLM: ${REFLECTION_LLM:-"meta-llama/llama-3.1-8b-instruct"}
       # reflection llm server url. If "", Nvidia hosted API is used
       REFLECTION_LLM_SERVERURL: ${REFLECTION_LLM_SERVERURL-"nim-llm:8000"}
       # enable iterative query decomposition
@@ -162,7 +164,7 @@ services:
       MAX_RECURSION_DEPTH: ${MAX_RECURSION_DEPTH:-3}
 
     ports:
-      - "8081:8081"
+      - "18081:8081"
     expose:
       - "8081"
     shm_size: 5gb

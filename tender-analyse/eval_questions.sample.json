@@ -1,0 +1,28 @@
+[
+  {
+    "id": "milestones",
+    "question": "Liste die Meilensteine des Vergabeverfahrens mit Datum.",
+    "checks": [
+      "Versand der Bekanntmachung: 18. Juli 2025",
+      "Teilnahmefrist: 01. September 2025 12:00",
+      "Aufforderung Angebotsabgabe: KW 40 2025"
+    ]
+  },
+  {
+    "id": "lots",
+    "question": "Welche Lose werden ausgeschrieben und was beinhalten sie?",
+    "checks": [
+      "Beratungsleistung",
+      "Software-Entwicklungen/Systemimplementierung",
+      "Betriebsunterstützung/Schulungen"
+    ]
+  },
+  {
+    "id": "platform",
+    "question": "Über welche Plattform laufen Kommunikation und Einreichung?",
+    "checks": [
+      "www.evergabe.sachsen.de",
+      "Bewerberfragen und Teilnahmeanträge über Plattform"
+    ]
+  }
+]

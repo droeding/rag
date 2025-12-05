@@ -1,0 +1,5 @@
+- Security Monitoring / SIEM: Microsoft Sentinel  
+- Endpoint Protection / EDR: Microsoft Defender for Endpoint, Sentinel One  
+- Netzwerk &amp; Remote Access / Firewalls: WSUS, Patch my PC  
+- Microsoft 365 / Cloud / Collaboration: Microsoft 365 Plattform, ShareGate, EasyLife 365, Entra ID, Microsoft Defender for Office 365, Intune / Endpoint Manager  
+- Betrieb &amp; Services (SLA/Support/Service-Modelle): SCCM, WSUS, Patch my PC, Jira Service Desk, iDoIT

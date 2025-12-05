@@ -352,10 +352,11 @@ async def check_all_services_health(vdb_op: VDBRag) -> dict[str, list[dict[str, 
         config.summarizer.server_url
     ):
         llm_url = config.summarizer.server_url
+        # vLLM exposes /v1/models (no /v1/health/ready). Use models endpoint for readiness.
         if not llm_url.startswith(("http://", "https://")):
-            llm_url = f"http://{llm_url}/v1/health/ready"
+            llm_url = f"http://{llm_url}/v1/models"
         else:
-            llm_url = f"{llm_url}/v1/health/ready"
+            llm_url = f"{llm_url}/v1/models"
 
         # For local services, we need to create a custom result with model info
         async def check_summary_llm_health():
