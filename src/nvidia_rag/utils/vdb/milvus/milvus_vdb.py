@@ -464,7 +464,7 @@ class MilvusVDB(Milvus, VDBRag):
                 field_name="vector",
                 index_name="dense_index",
                 index_type="FLAT",
-                metric_type="L2",
+                metric_type="IP",  # Changed from L2 - IP is correct for normalized E5 embeddings
             )
             client.create_collection(
                 collection_name=DEFAULT_METADATA_SCHEMA_COLLECTION,
@@ -603,7 +603,7 @@ class MilvusVDB(Milvus, VDBRag):
                 collection_name=collection_name,
                 index_params={
                     "index_type": CONFIG.vector_store.index_type,
-                    "metric_type": "L2",
+                    "metric_type": "IP",  # Changed from L2 - IP is correct for normalized E5 embeddings
                     "nlist": CONFIG.vector_store.nlist,
                 },
                 search_params=search_params,

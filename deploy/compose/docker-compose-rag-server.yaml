@@ -46,7 +46,8 @@ services:
       COLLECTION_NAME: ${COLLECTION_NAME:-}
       APP_RETRIEVER_SCORETHRESHOLD: 0.25
       # Top K from vector DB, which goes as input to reranker model if enabled, else goes to LLM prompt
-      VECTOR_DB_TOPK: ${VECTOR_DB_TOPK:-10}
+      # Increased from 10 to 40 - more candidates for reranker to select from
+      VECTOR_DB_TOPK: ${VECTOR_DB_TOPK:-40}
 
       ##===LLM Model specific configurations===
       APP_LLM_MODELNAME: ${APP_LLM_MODELNAME:-"nvidia/NVIDIA-Nemotron-Nano-12B-v2"}
@@ -84,7 +85,8 @@ services:
       APP_RANKING_MODELNAME: ${APP_RANKING_MODELNAME:-"nvidia/llama-3.2-nv-rerankqa-1b-v2"}
       ENABLE_RERANKER: true
       # Default confidence threshold for filtering documents by reranker relevance scores (0.0 to 1.0)
-      RERANKER_CONFIDENCE_THRESHOLD: ${RERANKER_CONFIDENCE_THRESHOLD:-0.0}
+      # Lowered from 0.25 to 0.1 - IP metric produces different score distribution
+      RERANKER_CONFIDENCE_THRESHOLD: ${RERANKER_CONFIDENCE_THRESHOLD:-0.1}
 
       ##===VLM Model specific configurations===
       ENABLE_VLM_INFERENCE: ${ENABLE_VLM_INFERENCE:-false}
@@ -110,7 +112,8 @@ services:
       LLM_API_KEY: ${LLM_API_KEY:-""}
 
       # Number of document chunks to insert in LLM prompt, used only when ENABLE_RERANKER is set to True
-      APP_RETRIEVER_TOPK: ${APP_RETRIEVER_TOPK:-5}
+      # Increased from 5 to 20 - more context for LLM to find complete answers
+      APP_RETRIEVER_TOPK: ${APP_RETRIEVER_TOPK:-20}
 
       # Log level for server, supported level NOTSET, DEBUG, INFO, WARN, ERROR, CRITICAL
       LOGLEVEL: ${LOGLEVEL:-INFO}

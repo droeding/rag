@@ -448,8 +448,9 @@ class RetrieverConfig(ConfigWizard):
 
     top_k: int = configfield(
         "top_k",
+        env_name="APP_RETRIEVER_TOPK",
         default=10,
-        help_txt="Number of relevant results to retrieve",
+        help_txt="Number of relevant results to retrieve (reranker output limit)",
     )
     vdb_top_k: int = configfield(
         "vdb_top_k",
