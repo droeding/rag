@@ -188,6 +188,9 @@ class MilvusVDB(Milvus, VDBRag):
             dense_dim=dimension,
         )
 
+        # Fix the index metric type from L2 (nv-ingest default) to IP (required for E5 embeddings)
+        self.fix_collection_index_metric(collection_name)
+
     def check_collection_exists(self, collection_name: str) -> bool:
         """
         Check if a collection exists in the Milvus index.
@@ -195,6 +198,111 @@ class MilvusVDB(Milvus, VDBRag):
         if not utility.has_collection(collection_name, using=self.connection_alias):
             return False
         return True
+
+    def fix_collection_index_metric(self, collection_name: str) -> bool:
+        """
+        Fix the collection index metric type from L2 to IP (Inner Product).
+
+        nv-ingest-client creates collections with L2 metric by default, but
+        E5 embeddings (used by NeMo Retriever) expect IP (Inner Product) metric
+        for optimal similarity scoring.
+
+        This method:
+        1. Releases the collection from memory
+        2. Drops the existing dense_index (L2)
+        3. Creates a new dense_index with IP metric
+        4. Reloads the collection
+
+        Args:
+            collection_name: Name of the collection to fix
+
+        Returns:
+            bool: True if successful, False otherwise
+        """
+        try:
+            if not self.check_collection_exists(collection_name):
+                logger.warning(
+                    f"Collection {collection_name} does not exist, skipping index fix"
+                )
+                return False
+
+            # Get collection object
+            collection = Collection(collection_name, using=self.connection_alias)
+
+            # Check if index exists and what metric it uses
+            indexes = collection.indexes
+            dense_index = None
+            for idx in indexes:
+                if idx.field_name == "vector":
+                    dense_index = idx
+                    break
+
+            if dense_index is None:
+                logger.info(
+                    f"No dense index found on collection {collection_name}, skipping fix"
+                )
+                return False
+
+            # Check current metric type
+            current_metric = dense_index.params.get("metric_type", "unknown")
+            if current_metric == "IP":
+                logger.info(
+                    f"Collection {collection_name} already uses IP metric, no fix needed"
+                )
+                return True
+
+            logger.info(
+                f"Fixing index metric for collection {collection_name}: {current_metric} -> IP"
+            )
+
+            # Step 1: Release collection from memory
+            collection.release()
+            logger.debug(f"Released collection {collection_name}")
+
+            # Step 2: Drop existing index on vector field
+            collection.drop_index(index_name="dense_index")
+            logger.debug(f"Dropped dense_index on collection {collection_name}")
+
+            # Step 3: Create new index with IP metric
+            # Using HNSW index type which is optimal for CPU search
+            index_params = {
+                "index_type": CONFIG.vector_store.index_type or "HNSW",
+                "metric_type": "IP",
+                "params": {
+                    "M": 64,
+                    "efConstruction": 512,
+                },
+            }
+
+            # For IVF_FLAT index type
+            if CONFIG.vector_store.index_type == "IVF_FLAT":
+                index_params["params"] = {"nlist": CONFIG.vector_store.nlist or 1024}
+
+            collection.create_index(
+                field_name="vector", index_params=index_params, index_name="dense_index"
+            )
+            logger.debug(
+                f"Created new dense_index with IP metric on collection {collection_name}"
+            )
+
+            # Step 4: Reload collection
+            collection.load()
+            logger.info(
+                f"Successfully fixed index metric for collection {collection_name} to IP"
+            )
+
+            return True
+
+        except MilvusException as e:
+            logger.error(
+                f"Milvus error while fixing index metric for {collection_name}: {e}"
+            )
+            return False
+        except Exception as e:
+            logger.error(
+                f"Unexpected error while fixing index metric for {collection_name}: {e}"
+            )
+            return False
 
     def _get_milvus_entities(self, collection_name: str, filter: str = ""):
         """

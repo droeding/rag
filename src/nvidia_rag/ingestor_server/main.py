@@ -466,6 +466,17 @@ class NvidiaRAGIngestor:
                 time.time() - start_time,
             )
 
+            # Post-ingest hook: Fix index metric type from L2 to IP
+            # nv-ingest creates collections with L2 metric, but E5 embeddings need IP
+            if hasattr(vdb_op, "fix_collection_index_metric"):
+                try:
+                    vdb_op.fix_collection_index_metric(collection_name)
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to fix index metric for collection {collection_name}: {e}. "
+                        "Retrieval may return incorrect scores. Consider recreating the collection."
+                    )
+
             # Get failed documents
             failed_documents = await self.__get_failed_documents(
                 failures, filepaths, collection_name
