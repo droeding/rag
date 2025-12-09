@@ -2,6 +2,45 @@
 
 This file provides guidance and memory for Codex CLI.
 
+---
+
+## Project-Specific Context (NVIDIA RAG Blueprint)
+
+> **Wichtig:** Lies zuerst `PROJECT_STATUS.md` für den vollständigen Projektstatus.
+
+### Quick Reference
+
+| Aspekt | Details |
+|--------|---------|
+| **Projekt** | NVIDIA RAG Blueprint (angepasst) |
+| **Version** | 2.3.0.dev |
+| **Python** | 3.12+ (UV als Package Manager) |
+| **Frontend** | React 18 + TypeScript + Vite |
+| **LLM** | Nemotron-Nano-12B-v2 via vLLM (GPU 0) |
+| **Vector DB** | Milvus + MinIO |
+
+### Architektur-Übersicht
+```
+Frontend (React) → RAG Server (FastAPI) → NIM Services (GPU)
+                 → Ingestor Server      → Milvus/MinIO
+```
+
+### Wichtige Pfade
+- **Backend:** `src/nvidia_rag/rag_server/`, `src/nvidia_rag/ingestor_server/`
+- **Frontend:** `frontend/src/`
+- **Config:** `deploy/compose/.env.single-a100`, `deploy/compose/nims.yaml`
+- **Tests:** `tests/unit/`, `frontend/src/**/__tests__/`
+
+### Entwicklungs-Befehle
+```bash
+./scripts/stack.sh start    # Stack starten
+./scripts/stack.sh stop     # Stack stoppen
+./check-health.sh           # Health Check
+watch -n2 nvidia-smi        # GPU Monitoring
+```
+
+---
+
 <!-- BEGIN: BMAD-AGENTS -->
 # BMAD-METHOD Agents and Tasks
 
