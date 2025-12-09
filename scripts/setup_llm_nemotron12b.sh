@@ -11,8 +11,12 @@
 
 set -euo pipefail
 
+if [[ -z "${HF_TOKEN:-}" ]] && [[ -f "$HOME/.huggingface/token" ]]; then
+  HF_TOKEN=$(cat "$HOME/.huggingface/token")
+fi
 if [[ -z "${HF_TOKEN:-}" ]]; then
   echo "Bitte HF_TOKEN setzen (HuggingFace Access Token)."
+  echo "Tipp: echo 'hf_...' > ~/.huggingface/token"
   exit 1
 fi
 
@@ -31,4 +35,3 @@ echo "=== Schritt 3: Health/Models prüfen ==="
 ./scripts/check_llm_model.sh
 
 echo "Fertig. Wenn healthy, Benchmark laufen lassen mit run_rag_analysis."
-

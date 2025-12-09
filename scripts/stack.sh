@@ -28,6 +28,11 @@ require_env() {
   set -a
   . "$ENV_FILE"
   set +a
+
+  # Auto-load HF token if not provided
+  if [[ -z "${HF_TOKEN:-}" ]] && [[ -f "$HOME/.huggingface/token" ]]; then
+    HF_TOKEN=$(cat "$HOME/.huggingface/token")
+  fi
 }
 
 stop_stack() {

@@ -13,8 +13,12 @@ ENV_FILE=${ENV_FILE:-deploy/compose/.env.single-a100}
 SERVICE_NAME=${SERVICE_NAME:-nim-llm}
 COMPOSE="docker compose --env-file ${ENV_FILE} -f deploy/compose/nims.yaml -f deploy/compose/nims.a100.yaml"
 
+if [[ -z "${HF_TOKEN:-}" ]] && [[ -f "$HOME/.huggingface/token" ]]; then
+  HF_TOKEN=$(cat "$HOME/.huggingface/token")
+fi
 if [[ -z "${HF_TOKEN:-}" ]]; then
   echo "ERROR: HF_TOKEN is required (HuggingFace access token for the model)." >&2
+  echo "Tipp: echo 'hf_...' > ~/.huggingface/token" >&2
   exit 1
 fi
 
